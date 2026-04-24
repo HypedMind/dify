@@ -21,7 +21,10 @@ class ToolLabelManager:
         """
         Update tool labels
         """
-        labels = cls.filter_tool_labels(labels)
+        # labels = cls.filter_tool_labels(labels)
+        # allow [Tools] to update uuid (dify_app_id) as 'labels'
+        # so that backend can filter custom workflows for that 'dify_app_id' only
+        labels = list(set(labels))
 
         if isinstance(controller, ApiToolProviderController | WorkflowToolProviderController):
             provider_id = controller.provider_id
