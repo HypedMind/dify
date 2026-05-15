@@ -99,7 +99,14 @@ class WorkflowCycleManager:
 
         self._add_trace_task_if_needed(trace_manager, workflow_execution, conversation_id, external_trace_id)
 
+        # Studio-local change: drain async node-execution writes before marking
+        # the workflow run finished, so the UI never sees "done" with missing rows.
+        self._workflow_node_execution_repository.flush()
         self._workflow_execution_repository.save(workflow_execution)
+        # Flush the workflow-execution writer too — the SSE workflow-finished
+        # event reads WorkflowRun back from DB (see
+        # workflow_response_converter.workflow_finish_to_stream_response).
+        self._workflow_execution_repository.flush()
         return workflow_execution
 
     def handle_workflow_run_partial_success(
@@ -127,7 +134,9 @@ class WorkflowCycleManager:
 
         self._add_trace_task_if_needed(trace_manager, execution, conversation_id, external_trace_id)
 
+        self._workflow_node_execution_repository.flush()
         self._workflow_execution_repository.save(execution)
+        self._workflow_execution_repository.flush()
         return execution
 
     def handle_workflow_run_failed(
@@ -159,7 +168,9 @@ class WorkflowCycleManager:
         self._fail_running_node_executions(workflow_execution.id_, error_message, now)
         self._add_trace_task_if_needed(trace_manager, workflow_execution, conversation_id, external_trace_id)
 
+        self._workflow_node_execution_repository.flush()
         self._workflow_execution_repository.save(workflow_execution)
+        self._workflow_execution_repository.flush()
         return workflow_execution
 
     def handle_node_execution_start(
@@ -168,6 +179,11 @@ class WorkflowCycleManager:
         workflow_execution_id: str,
         event: QueueNodeStartedEvent,
     ) -> WorkflowNodeExecution:
+        # Studio-local change: skip the DB save for the start record. Each node
+        # used to round-trip Postgres (via PgBouncer) twice — once here, once
+        # on completion — adding ~800ms per node. The in-memory cache below is
+        # all that downstream handlers (success/failure/fail_running) need; the
+        # node row lands in the DB on completion.
         workflow_execution = self._get_workflow_execution_or_raise_error(workflow_execution_id)
 
         domain_execution = self._create_node_execution_from_event(
@@ -176,7 +192,9 @@ class WorkflowCycleManager:
             status=WorkflowNodeExecutionStatus.RUNNING,
         )
 
-        return self._save_and_cache_node_execution(domain_execution)
+        if domain_execution.node_execution_id:
+            self._node_execution_cache[domain_execution.node_execution_id] = domain_execution
+        return domain_execution
 
     def handle_workflow_node_execution_success(self, *, event: QueueNodeSucceededEvent) -> WorkflowNodeExecution:
         domain_execution = self._get_node_execution_from_cache(event.node_execution_id)

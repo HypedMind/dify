@@ -4,6 +4,8 @@ SQLAlchemy implementation of the WorkflowNodeExecutionRepository.
 
 import json
 import logging
+import queue
+import threading
 from collections.abc import Sequence
 from typing import Optional, Union
 
@@ -89,6 +91,15 @@ class SQLAlchemyWorkflowNodeExecutionRepository(WorkflowNodeExecutionRepository)
         # Initialize in-memory cache for node executions
         # Key: node_execution_id, Value: WorkflowNodeExecution (DB model)
         self._node_execution_cache: dict[str, WorkflowNodeExecutionModel] = {}
+
+        # Studio-local change: async node-execution persistence.
+        # Each save() enqueues a db_model; a single daemon worker drains the queue
+        # using one long-lived session, so the graph engine's hot path never blocks
+        # on Postgres/PgBouncer round-trips.
+        self._write_queue: queue.Queue = queue.Queue()
+        self._writer_thread: Optional[threading.Thread] = None
+        self._writer_lock = threading.Lock()
+        self._shutdown = False
 
     def _to_domain_model(self, db_model: WorkflowNodeExecutionModel) -> WorkflowNodeExecution:
         """
@@ -188,35 +199,116 @@ class SQLAlchemyWorkflowNodeExecutionRepository(WorkflowNodeExecutionRepository)
 
     def save(self, execution: WorkflowNodeExecution) -> None:
         """
-        Save or update a NodeExecution domain entity to the database.
+        Studio-local change: async node-execution persistence.
 
-        This method serves as a domain-to-database adapter that:
-        1. Converts the domain entity to its database representation
-        2. Persists the database model using SQLAlchemy's merge operation
-        3. Maintains proper multi-tenancy by including tenant context during conversion
-        4. Updates the in-memory cache for faster subsequent lookups
-
-        The method handles both creating new records and updating existing ones through
-        SQLAlchemy's merge operation.
-
-        Args:
-            execution: The NodeExecution domain entity to persist
+        Converts the domain entity to a DB model on the calling thread (cheap —
+        attribute assignment + JSON dumps), updates the in-memory cache, and
+        enqueues the DB write for a background worker. The graph engine's hot
+        path returns immediately instead of waiting for a Postgres/PgBouncer
+        round-trip. Call flush() before signalling workflow completion to ensure
+        the row is durable.
         """
-        # Convert domain model to database model using tenant context and other attributes
+        # Convert domain model to database model on the caller's thread so that
+        # the in-memory cache reflects the latest state before the next event.
         db_model = self.to_db_model(execution)
 
-        # Create a new database session
-        with self._session_factory() as session:
-            # SQLAlchemy merge intelligently handles both insert and update operations
-            # based on the presence of the primary key
-            session.merge(db_model)
-            session.commit()
+        # Cache eagerly — subsequent handlers (e.g. _get_node_execution_from_cache
+        # in workflow_cycle_manager) must see this row even if the DB write is
+        # still queued.
+        if db_model.node_execution_id:
+            self._node_execution_cache[db_model.node_execution_id] = db_model
 
-            # Update the in-memory cache for faster subsequent lookups
-            # Only cache if we have a node_execution_id to use as the cache key
-            if db_model.node_execution_id:
-                logger.debug("Updating cache for node_execution_id: %s", db_model.node_execution_id)
-                self._node_execution_cache[db_model.node_execution_id] = db_model
+        self._ensure_writer_started()
+        self._write_queue.put(db_model)
+
+    def _ensure_writer_started(self) -> None:
+        if self._writer_thread is not None:
+            return
+        with self._writer_lock:
+            if self._writer_thread is not None:
+                return
+            t = threading.Thread(
+                target=self._writer_loop,
+                name=f"wf-node-exec-writer-{id(self)}",
+                daemon=True,
+            )
+            t.start()
+            self._writer_thread = t
+
+    def _writer_loop(self) -> None:
+        """
+        Drain the write queue using a single long-lived session per repository
+        instance. One connection checkout per workflow run instead of one per
+        node. Errors on individual rows are logged but do not stop the worker.
+        """
+        session = self._session_factory()
+        try:
+            while True:
+                item = self._write_queue.get()
+                try:
+                    if item is None:
+                        return
+                    try:
+                        # The row may already exist for completion saves where
+                        # we previously persisted a start record from elsewhere
+                        # (e.g. retry path). merge() handles both insert and
+                        # update; the single round-trip cost is dominated by
+                        # network latency, which the background thread absorbs.
+                        session.merge(item)
+                        session.commit()
+                    except Exception:
+                        logger.exception(
+                            "Async write failed for node_execution_id=%s",
+                            getattr(item, "node_execution_id", None),
+                        )
+                        try:
+                            session.rollback()
+                        except Exception:
+                            logger.exception("Rollback failed in node-execution writer")
+                finally:
+                    self._write_queue.task_done()
+        finally:
+            try:
+                session.close()
+            except Exception:
+                logger.exception("Failed to close node-execution writer session")
+
+    def flush(self, timeout: Optional[float] = 30.0) -> None:
+        """
+        Block until all enqueued node-execution writes have been persisted.
+        Call from workflow terminal handlers before marking the run finished
+        so the UI never sees "workflow done" with missing node rows.
+        """
+        if self._writer_thread is None:
+            return
+        # queue.Queue.join() has no timeout; emulate one so a stuck DB can't
+        # deadlock the workflow run.
+        if timeout is None:
+            self._write_queue.join()
+            return
+        done = threading.Event()
+
+        def _waiter() -> None:
+            self._write_queue.join()
+            done.set()
+
+        threading.Thread(target=_waiter, name="wf-node-exec-flush-wait", daemon=True).start()
+        if not done.wait(timeout):
+            logger.warning(
+                "Node-execution flush timed out after %.1fs; %d writes still pending",
+                timeout,
+                self._write_queue.unfinished_tasks,
+            )
+
+    def shutdown(self) -> None:
+        """Stop the background writer. Safe to call repeatedly."""
+        if self._shutdown:
+            return
+        self._shutdown = True
+        if self._writer_thread is None:
+            return
+        self._write_queue.put(None)
+        self._writer_thread.join(timeout=30.0)
 
     def get_db_models_by_workflow_run(
         self,
