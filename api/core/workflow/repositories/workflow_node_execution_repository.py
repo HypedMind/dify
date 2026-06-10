@@ -34,10 +34,23 @@ class WorkflowNodeExecutionRepository(Protocol):
         The implementation should determine whether to create or update based on
         the execution's ID or other identifying fields.
 
+        Implementations may persist asynchronously; callers that need the write
+        to be durable before proceeding (e.g. workflow-run terminal handlers)
+        should call ``flush()`` afterwards.
+
         Args:
             execution: The NodeExecution instance to save or update
         """
         ...
+
+    def flush(self, timeout: Optional[float] = 30.0) -> None:
+        """
+        Block until all enqueued saves are durable.
+
+        Default implementation is a no-op for synchronous repositories.
+        Asynchronous implementations override this to drain their write queue.
+        """
+        return None
 
     def get_by_workflow_run(
         self,
