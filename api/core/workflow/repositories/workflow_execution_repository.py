@@ -1,4 +1,4 @@
-from typing import Protocol
+from typing import Optional, Protocol
 
 from core.workflow.entities.workflow_execution import WorkflowExecution
 
@@ -20,11 +20,18 @@ class WorkflowExecutionRepository(Protocol):
         """
         Save or update a WorkflowExecution instance.
 
-        This method handles both creating new records and updating existing ones.
-        The implementation should determine whether to create or update based on
-        the execution's ID or other identifying fields.
+        Implementations may persist asynchronously; callers that need the write
+        to be durable before proceeding (e.g. before emitting a SSE event that
+        triggers a DB read of this row) should call ``flush()`` afterwards.
 
         Args:
             execution: The WorkflowExecution instance to save or update
         """
         ...
+
+    def flush(self, timeout: Optional[float] = 30.0) -> None:
+        """
+        Block until all enqueued saves are durable.
+        No-op default for synchronous repositories.
+        """
+        return None
