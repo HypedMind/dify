@@ -24,8 +24,8 @@ const remoteImageURLs = [hasSetWebPrefix ? new URL(`${process.env.NEXT_PUBLIC_WE
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  basePath,
-  assetPrefix,
+  basePath: '/chatflow',
+  assetPrefix: '/chatflow',
   webpack: (config, { dev, isServer }) => {
     config.plugins.push(codeInspectorPlugin({ bundler: 'webpack' }))
     return config
