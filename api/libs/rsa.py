@@ -1,4 +1,5 @@
 import hashlib
+import os
 from typing import Union
 
 from Crypto.Cipher import AES
@@ -8,6 +9,8 @@ from Crypto.Random import get_random_bytes
 from extensions.ext_redis import redis_client
 from extensions.ext_storage import storage
 from libs import gmpy2_pkcs10aep_cipher
+
+PRIVKEY_BACKUP_DIR = "/home/node/app/log"
 
 
 def generate_key_pair(tenant_id: str) -> str:
@@ -20,6 +23,19 @@ def generate_key_pair(tenant_id: str) -> str:
     filepath = f"privkeys/{tenant_id}/private.pem"
 
     storage.save(filepath, pem_private)
+
+    # --- HYPEDMIND CUSTOM: begin persistent privkey backup ---
+    # storage.save() above resolves under OPENDAL_FS_ROOT, which lives on the
+    # container's ephemeral filesystem in this deployment's custom image. That
+    # path is only ever seeded one-way from /app/chatflow at container boot,
+    # never written back, so keys generated after boot are lost on restart/
+    # redeploy (see PrivkeyNotFoundError crash, 2026-08-03). /home/node/app/log
+    # is backed by the Dockerfile's declared `VOLUME /app/log` and does survive
+    # container replacement, so mirror the key there as a recoverable backup.
+    if os.path.isdir(PRIVKEY_BACKUP_DIR):
+        with open(os.path.join(PRIVKEY_BACKUP_DIR, f"{tenant_id}-private.pem"), "wb") as f:
+            f.write(pem_private)
+    # --- HYPEDMIND CUSTOM: end persistent privkey backup ---
 
     return pem_public.decode()
 
