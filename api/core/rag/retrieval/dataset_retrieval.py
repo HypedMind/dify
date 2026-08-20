@@ -498,6 +498,11 @@ class DatasetRetrieval:
                 elif index_type == "high_quality":
                     all_documents = self.calculate_vector_score(all_documents, top_k, score_threshold)
                 else:
+                    all_documents = sorted(
+                        all_documents,
+                        key=lambda x: x.metadata.get("score", 0) if x.metadata else 0,
+                        reverse=True,
+                    )
                     all_documents = all_documents[:top_k] if top_k else all_documents
 
         self._on_query(query, dataset_ids, app_id, user_from, user_id)
