@@ -31,7 +31,7 @@ const EmptyDatasetCreationModal = ({
       notify({ type: 'error', message: t('datasetCreation.stepOne.modal.nameNotEmpty') })
       return
     }
-    if (inputValue.length > 40) {
+    if (inputValue.length > 255) {
       notify({ type: 'error', message: t('datasetCreation.stepOne.modal.nameLengthInvalid') })
       return
     }
