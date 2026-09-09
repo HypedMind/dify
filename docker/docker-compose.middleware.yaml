@@ -71,7 +71,8 @@ services:
 
   # plugin daemon
   plugin_daemon:
-    image: langgenius/dify-plugin-daemon:0.2.0-local
+    # image: langgenius/dify-plugin-daemon:0.2.0-local
+    image: langgenius/dify-plugin-daemon:0.3.3-local
     restart: always
     env_file:
       - ./middleware.env
@@ -99,7 +100,8 @@ services:
       PLUGIN_REMOTE_INSTALLING_HOST: ${PLUGIN_DEBUGGING_HOST:-0.0.0.0}
       PLUGIN_REMOTE_INSTALLING_PORT: ${PLUGIN_DEBUGGING_PORT:-5003}
       PLUGIN_WORKING_PATH: ${PLUGIN_WORKING_PATH:-/app/storage/cwd}
-      FORCE_VERIFYING_SIGNATURE: ${FORCE_VERIFYING_SIGNATURE:-true}
+      FORCE_VERIFYING_SIGNATURE: ${FORCE_VERIFYING_SIGNATURE:-false}
+      ENFORCE_LANGGENIUS_PLUGIN_SIGNATURES: ${ENFORCE_LANGGENIUS_PLUGIN_SIGNATURES:-false}
       PYTHON_ENV_INIT_TIMEOUT: ${PLUGIN_PYTHON_ENV_INIT_TIMEOUT:-120}
       PLUGIN_MAX_EXECUTION_TIMEOUT: ${PLUGIN_MAX_EXECUTION_TIMEOUT:-600}
       PIP_MIRROR_URL: ${PIP_MIRROR_URL:-}
